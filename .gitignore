@@ -1,0 +1,50 @@
+# --- secrets / API keys (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.key
+secrets.*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- large / copyrighted source data ---
+# The NYT corpus is ~25MB and copyrighted: keep it local, don't push it.
+data/crosswordsnyt.csv
+# Uncomment to keep ALL data local instead of tracking the Tagalog CSVs too:
+# data/
+
+# --- generated artifacts (synthetic clues, verified sets, exports) ---
+data/synthetic*.csv
+data/synthetic*.jsonl
+data/verified*.csv
+data/verified*.jsonl
+outputs/
+runs/
+
+# --- model checkpoints / weights ---
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.gguf
+models/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
