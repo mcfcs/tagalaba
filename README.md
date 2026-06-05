@@ -39,18 +39,53 @@ PYTHONPATH=src python -m tagalaba ABANIKO --english   # allow EN glosses
 
 Ranking (most→least natural): `bugtong > tagalog gloss > synonym > place > english gloss`.
 
+## Synthesis pipeline (builds the training data)
+
+`tagalaba.synthesize` produces a verified Tagalog clue set:
+**Gemini generates** natural-Tagalog clues per word → leakage filter →
+**Claude Haiku solves each clue back** to the answer (honest round-trip, a
+*different* model than the generator) → keep only clues that recover the word.
+Output is resumable JSONL, rate-limited for Gemini's free tier.
+
+```bash
+pip install -e .                          # makes `tagalaba` importable everywhere
+                                          #   (no PYTHONPATH needed; Windows-friendly)
+copy .env.example .env                     # then fill ANTHROPIC_API_KEY (+ GEMINI_API_KEY)
+
+python -m tagalaba.synthesize --dry-run --limit 3   # prompts only, no cost
+python -m tagalaba.synthesize --limit 50            # pilot, eyeball quality
+python -m tagalaba.synthesize --limit 30000         # full set (resumable)
+```
+
+**Generator backend** (`--gen-provider`, default `anthropic`):
+- `anthropic` — Claude **Sonnet** generates, **Haiku** verifies (two different
+  models, so the solver isn't the author). Works with just your Anthropic key.
+- `gemini` — Gemini Flash generates (cheapest), Haiku verifies. Needs Gemini
+  free-tier access or prepaid credits.
+
+Keys are read from `.env` (git-ignored). `--max-rank 1` (default) is strict
+precision; raise it to keep more borderline clues. Cost: pilot < $1; full set
+~$150 all-Claude, or ~$15 if you enable Gemini for generation.
+
+## Training & deployment — sized for a 16 GB-RAM laptop
+
+| Stage | Where | Notes |
+|---|---|---|
+| Build dataset (above) | the laptop, via APIs | light, API-bound |
+| **Fine-tune** | **free cloud GPU** (Colab/Kaggle T4) | 16 GB RAM can't train an LLM |
+| **Run the model** | the laptop, **CPU** | must be small |
+
+Local-inference targets that fit 16 GB on CPU:
+- **mT5-base (580M)** — purpose-built seq2seq for word→clue; trivial on CPU.
+- **A 4-bit ≤3B decoder** (Gemma-2-2B / Qwen2.5-3B) via **Ollama** — ~2 GB,
+  more natural fluency. Avoid 7B+ (runs but painfully slow on CPU).
+
 ## Roadmap
 
 1. **[done]** Baseline retrieval generator + unified data index.
-2. **Round-trip verifier** — generate a clue, solve it back with an LLM/solver,
-   keep only clues that recover the answer. The single biggest quality lever.
-3. **Synthesize a Tagalog clue set** — use a Filipino-capable LLM to write
-   natural Tagalog clues (seeded by synonym + English meaning + bugtong style),
-   filter by round-trip + leakage. This becomes the training data.
-4. **Fine-tune** a self-hosted model (mT5 or QLoRA'd SEA-LION/Sailor) on the
-   verified set, conditioned on difficulty once labels exist.
-5. **Evaluate** — round-trip solve rate, leakage rate, held-out-by-word, human
-   preference.
+2. **[done]** Round-trip verifier + synthesis pipeline (`synthesize.py`).
+3. **Fine-tune** mT5-base / a quantized ≤3B decoder on the verified set (cloud GPU).
+4. **Evaluate** — round-trip solve rate, leakage rate, held-out-by-word, human pref.
 
 ## Layout
 

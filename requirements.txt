@@ -1,0 +1,8 @@
+# Synthesis + verification pipeline (run on your laptop; API-bound, light).
+google-genai>=0.3.0       # Gemini generation (new google-genai SDK)
+anthropic>=0.40.0         # Claude Haiku verification
+python-dotenv>=1.0.0      # load .env (optional; we also parse it manually)
+
+# Training (run in the cloud, NOT on the 16GB laptop):
+#   transformers, datasets, accelerate, peft, bitsandbytes, sentencepiece
+# Local inference target: mT5-base via transformers, OR a quantized <=3B model via Ollama.
