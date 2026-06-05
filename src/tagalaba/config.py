@@ -41,7 +41,16 @@ GEN_PROVIDER = _get("TAGALABA_GEN_PROVIDER", "gemini")
 # purpose, so the round-trip solver never just re-reads its own intent.
 GEN_MODEL = _get("TAGALABA_GEN_MODEL", "gemini-2.5-flash")          # if provider=gemini
 ANTHROPIC_GEN_MODEL = _get("TAGALABA_ANTHROPIC_GEN_MODEL", "claude-sonnet-4-6")
-VERIFY_MODEL = _get("TAGALABA_VERIFY_MODEL", "claude-haiku-4-5-20251001")
+
+# Verifier. Haiku proved too weak at Tagalog; Sonnet works but is pricey at
+# scale. Default: a DIFFERENT Gemini model than the generator (competent +
+# cheap + reasonably independent). Sonnet stays available for max rigor.
+VERIFY_PROVIDER = _get("TAGALABA_VERIFY_PROVIDER", "gemini")
+VERIFY_MODEL = _get("TAGALABA_VERIFY_MODEL", "claude-sonnet-4-6")   # if provider=anthropic
+GEMINI_VERIFY_MODEL = _get("TAGALABA_GEMINI_VERIFY_MODEL", "gemini-3.5-flash")
+
+# Concurrency: words processed in parallel (paid Gemini handles high RPM).
+WORKERS = int(_get("TAGALABA_WORKERS", "8"))
 
 # Words/min cap. Paid Gemini allows far more than the old free-tier 15; the real
 # limit is per-word latency (gen + a few verify calls run sequentially).

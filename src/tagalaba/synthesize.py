@@ -1,16 +1,17 @@
 """Build a verified Tagalog clue training set.
 
-For each answer word:
-  1. Gemini writes N natural-Tagalog clue candidates (seeded by synonyms/meaning).
-  2. Drop any clue that leaks the answer.
-  3. Claude Haiku tries to SOLVE each clue back to the word (round-trip).
-  4. Keep a clue only if Claude recovers the answer within --max-rank guesses.
+For each answer word (processed concurrently across --workers threads):
+  1. The generator model writes N natural-Tagalog clue candidates.
+  2. Drop any clue that leaks the answer or exceeds --max-words.
+  3. A DIFFERENT model tries to SOLVE each clue back to the word (round-trip).
+  4. Keep a clue only if the solver recovers the answer (or a known synonym of
+     it) within --max-rank guesses.
 
-Output is JSONL (one verified clue per line), resumable, free-tier rate-limited.
+Output is JSONL (one verified clue per line), resumable (skips done words).
 
-Run (after `pip install -r requirements.txt` and filling .env):
-    PYTHONPATH=src python -m tagalaba.synthesize --limit 50            # pilot
-    PYTHONPATH=src python -m tagalaba.synthesize --dry-run --limit 3   # no API calls
+Run (after `pip install -e .` and filling .env):
+    python -m tagalaba.synthesize --limit 200          # pilot
+    python -m tagalaba.synthesize --dry-run --limit 3  # no API calls
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import argparse
 import json
 import os
 import sys
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import config, prompts
 from .normalize import answer_key, leaks_answer
@@ -57,12 +58,71 @@ def _done_keys(out_path: str) -> set[str]:
     return done
 
 
-def _rank_of(word: str, guesses: list[str]) -> int:
-    ak = answer_key(word)
+def _accept_rank(wr: WordResources, guesses: list[str]) -> int:
+    """Rank of the first guess matching the answer OR a known synonym of it.
+
+    Accepting synonyms (AKLAT<->LIBRO) means a clue that elicits the right
+    concept counts as solved -- crossing letters disambiguate in a real grid.
+    """
+    ok = {wr.key} | {answer_key(s) for s in wr.synonyms}
+    ok.discard("")
     for i, g in enumerate(guesses, 1):
-        if answer_key(g) == ak:
+        if answer_key(g) in ok:
             return i
     return 0
+
+
+def _process_word(wr, gen, ver, args):
+    """Generate + verify all clues for one word (runs in a worker thread).
+
+    Returns (out_records, dbg_records, attempted, dropped_long, warn). Re-raises
+    FatalAPIError so the main loop can abort the whole run.
+    """
+    from .llm import FatalAPIError  # lazy
+
+    out_records: list[dict] = []
+    dbg_records: list[dict] = []
+    attempted = dropped_long = 0
+
+    try:
+        cands = gen.generate(prompts.GEN_SYSTEM,
+                             prompts.gen_user_prompt(wr, args.clues_per_word))
+    except FatalAPIError:
+        raise
+    except Exception as e:  # noqa: BLE001 - transient; skip this word
+        return out_records, dbg_records, 0, 0, f"gen failed for {wr.display}: {e}"
+
+    for c in cands:
+        clue = (c.get("clue") or "").strip()
+        if not clue or leaks_answer(clue, wr.display):
+            continue
+        if len(clue.split()) > args.max_words:   # too long -> drop
+            dropped_long += 1
+            continue
+        attempted += 1
+        try:
+            guesses = ver.guesses(prompts.VERIFY_SYSTEM,
+                                  prompts.verify_user_prompt(clue, len(wr.key)))
+        except FatalAPIError:
+            raise
+        except Exception:  # noqa: BLE001 - transient; skip clue
+            continue
+        rank = _accept_rank(wr, guesses)
+        keep = bool(rank and rank <= args.max_rank)
+        if args.debug_log:
+            dbg_records.append({
+                "answer": wr.display.upper(), "clue": clue,
+                "difficulty": c.get("difficulty"), "style": c.get("style"),
+                "rank": rank, "guesses": guesses, "kept": keep,
+            })
+        if keep:
+            out_records.append({
+                "key": wr.key, "answer": wr.display.upper(), "length": len(wr.key),
+                "clue": clue, "difficulty": c.get("difficulty"),
+                "style": c.get("style"), "verify_rank": rank,
+                "gen_model": gen.model, "verify_model": ver.model,
+            })
+    return out_records, dbg_records, attempted, dropped_long, None
 
 
 def run(args: argparse.Namespace) -> int:
@@ -77,79 +137,62 @@ def run(args: argparse.Namespace) -> int:
         print("\n[dry-run] No API calls made. Remove --dry-run to generate.")
         return 0
 
-    from .llm import ClaudeVerifier, FatalAPIError, make_generator  # lazy
+    from .llm import FatalAPIError, make_generator, make_verifier  # lazy
 
     gen = make_generator(args.gen_provider)
     if args.gen_model:
         gen.model = args.gen_model
-    ver = ClaudeVerifier()
-    print(f"generate: {gen.model}  |  verify: {ver.model}")
+    ver = make_verifier(args.verify_provider)
+    if args.verify_model:
+        ver.model = args.verify_model
+    print(f"generate: {gen.model}  |  verify: {ver.model}  |  workers: {args.workers}")
 
     done = _done_keys(args.out)
     todo = [w for w in words if w.key not in done]
     print(f"{len(done)} already done; {len(todo)} to process -> {args.out}")
+    if not todo:
+        return 0
 
-    min_interval = 60.0 / max(args.rpm, 1)
-    kept = attempted = 0
+    kept = attempted = dropped_long = 0
+    dbg = open(args.debug_log, "a", encoding="utf-8") if args.debug_log else None
+    fatal = None
 
-    with open(args.out, "a", encoding="utf-8") as out:
-        for n, wr in enumerate(todo, 1):
-            t0 = time.time()
+    # Writes happen only here in the main thread, so no file lock is needed.
+    with open(args.out, "a", encoding="utf-8") as out, \
+            ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(_process_word, wr, gen, ver, args): wr for wr in todo}
+        for n, fut in enumerate(as_completed(futs), 1):
             try:
-                cands = gen.generate(prompts.GEN_SYSTEM,
-                                     prompts.gen_user_prompt(wr, args.clues_per_word))
+                recs, dbgs, att, dl, warn = fut.result()
             except FatalAPIError as e:
-                print(f"\nFATAL: generation API is unusable -> {e}\n"
-                      f"Fix billing/quota, or switch provider with "
-                      f"--gen-provider {'gemini' if gen.model.startswith('claude') else 'anthropic'}.")
+                fatal = e
+                for f in futs:
+                    f.cancel()
                 break
-            except Exception as e:  # noqa: BLE001 - transient; skip this word
-                print(f"  ! gen failed for {wr.display}: {e}")
-                cands = []
-
-            for c in cands:
-                clue = (c.get("clue") or "").strip()
-                if not clue or leaks_answer(clue, wr.display):
-                    continue
-                attempted += 1
-                try:
-                    guesses = ver.guesses(
-                        prompts.VERIFY_SYSTEM,
-                        prompts.verify_user_prompt(clue, len(wr.key)),
-                    )
-                except FatalAPIError as e:
-                    print(f"\nFATAL: verification API is unusable -> {e}")
-                    return 1
-                except Exception as e:  # noqa: BLE001 - transient; skip clue
-                    print(f"  ! verify failed: {e}")
-                    continue
-                rank = _rank_of(wr.display, guesses)
-                if rank and rank <= args.max_rank:
-                    rec = {
-                        "key": wr.key,
-                        "answer": wr.display.upper(),
-                        "length": len(wr.key),
-                        "clue": clue,
-                        "difficulty": c.get("difficulty"),
-                        "style": c.get("style"),
-                        "verify_rank": rank,
-                        "gen_model": gen.model,
-                        "verify_model": ver.model,
-                    }
-                    out.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    out.flush()
-                    kept += 1
-
+            if warn:
+                print("  !", warn)
+            for rec in recs:
+                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                kept += 1
+            out.flush()
+            if dbg is not None and dbgs:
+                for d in dbgs:
+                    dbg.write(json.dumps(d, ensure_ascii=False) + "\n")
+                dbg.flush()
+            attempted += att
+            dropped_long += dl
             if n % 10 == 0 or n == len(todo):
                 print(f"  [{n}/{len(todo)}] kept={kept} attempted={attempted} "
                       f"pass={kept/max(attempted,1):.0%}")
 
-            dt = time.time() - t0
-            if dt < min_interval and n < len(todo):
-                time.sleep(min_interval - dt)
-
+    if dbg is not None:
+        dbg.close()
+    if fatal is not None:
+        print(f"\nFATAL: API unusable -> {fatal}\nProgress saved to {args.out}.")
+        return 1
     print(f"\nDone. Kept {kept}/{attempted} clues "
-          f"({kept/max(attempted,1):.0%} round-trip pass rate).")
+          f"({kept/max(attempted,1):.0%} round-trip pass rate); "
+          f"dropped {dropped_long} for length.")
     return 0
 
 
@@ -159,10 +202,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--clues-per-word", type=int, default=4)
     ap.add_argument("--max-rank", type=int, default=1,
                     help="keep clue if answer is within this guess rank (1=strict)")
-    ap.add_argument("--rpm", type=int, default=config.RPM, help="requests/min cap")
+    ap.add_argument("--max-words", type=int, default=12,
+                    help="drop clues longer than this many words")
+    ap.add_argument("--debug-log", default=None,
+                    help="write every attempt (clue, rank, guesses, kept) here")
+    ap.add_argument("--workers", type=int, default=config.WORKERS,
+                    help="words processed concurrently")
     ap.add_argument("--gen-provider", default=config.GEN_PROVIDER,
                     choices=["anthropic", "gemini"], help="clue generator backend")
     ap.add_argument("--gen-model", default=None, help="override generator model id")
+    ap.add_argument("--verify-provider", default=config.VERIFY_PROVIDER,
+                    choices=["anthropic", "gemini"], help="clue verifier backend")
+    ap.add_argument("--verify-model", default=None, help="override verifier model id")
     ap.add_argument("--out", default=config.DEFAULT_OUT)
     ap.add_argument("--no-require-synonym", action="store_true",
                     help="also process words lacking synonyms/bugtong")

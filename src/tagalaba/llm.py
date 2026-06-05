@@ -41,6 +41,7 @@ _FATAL_MARKERS = (
     "limit: 0", "depleted", "prepay", "billing", "quota exceeded for metric",
     "permission_denied", "unauthenticated", "api key not valid",
     "invalid_api_key", "authentication_error", "insufficient_quota",
+    "no longer available", "not_found", "not found", "404",
 )
 
 
@@ -168,3 +169,41 @@ class ClaudeVerifier:
         data = extract_json(text)
         gs = data.get("guesses", []) if isinstance(data, dict) else []
         return [g for g in gs if isinstance(g, str)]
+
+
+class GeminiVerifier:
+    """Solves a clue back to candidate answers using Gemini (cheap option)."""
+
+    def __init__(self, model: str | None = None) -> None:
+        if not config.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY not set (put it in .env).")
+        from google import genai  # lazy
+        from google.genai import types  # lazy
+
+        self._types = types
+        self._client = genai.Client(api_key=config.GEMINI_API_KEY)
+        self.model = model or config.GEMINI_VERIFY_MODEL
+
+    def guesses(self, system: str, user: str) -> list[str]:
+        cfg = self._types.GenerateContentConfig(
+            system_instruction=system, response_mime_type="application/json",
+            temperature=0.3,
+        )
+        resp = _retry(
+            lambda: self._client.models.generate_content(
+                model=self.model, contents=user, config=cfg
+            )
+        )
+        data = extract_json(getattr(resp, "text", "") or "")
+        gs = data.get("guesses", []) if isinstance(data, dict) else []
+        return [g for g in gs if isinstance(g, str)]
+
+
+def make_verifier(provider: str | None = None):
+    """Verifier factory: 'anthropic' (Sonnet, default) or 'gemini' (cheap)."""
+    provider = (provider or config.VERIFY_PROVIDER).lower()
+    if provider == "anthropic":
+        return ClaudeVerifier()
+    if provider == "gemini":
+        return GeminiVerifier()
+    raise ValueError(f"unknown verify provider: {provider!r}")

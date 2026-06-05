@@ -32,6 +32,9 @@ data/synthetic*.csv
 data/synthetic*.jsonl
 data/verified*.csv
 data/verified*.jsonl
+data/diag*           # throwaway diagnostic runs
+data/debug*          # debug-log output
+data/*_attempts.jsonl
 outputs/
 runs/
 
@@ -48,3 +51,4 @@ models/
 Thumbs.db
 .vscode/
 .idea/
+data/smoke.jsonl

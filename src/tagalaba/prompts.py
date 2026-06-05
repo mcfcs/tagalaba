@@ -24,7 +24,10 @@ GEN_SYSTEM = (
     "3. Patas at malulutas — malinaw na tumuturo sa sagot.\n"
     "4. Iba't ibang istilo: kahulugan, kasingkahulugan, 'punan ang patlang' "
     "(gamit ang ___), at banayad na palaisipan.\n"
-    "5. Iwasang maging tuyot o literal na salin mula sa Ingles.\n\n"
+    "5. Iwasang maging tuyot o literal na salin mula sa Ingles.\n"
+    "6. MAIKLI at tipid — tulad ng tunay na crossword clue. Karaniwang 2-7 "
+    "salita; HUWAG hihigit sa 10 salita. Iwasan ang mahabang paliwanag o "
+    "listahan; isang piraso ng pahiwatig lamang.\n\n"
     "Halimbawa ng natural na tono (bugtong, istilo lamang):\n  - "
     + "\n  - ".join(_STYLE_ANCHORS)
     + "\n\nIbalik LAMANG bilang JSON:\n"
@@ -47,9 +50,10 @@ def gen_user_prompt(wr: WordResources, n: int) -> str:
 
 VERIFY_SYSTEM = (
     "You are an expert Tagalog crossword solver. You are given a clue and the "
-    "number of letters in the answer. Reply with your three best guesses as "
+    "number of letters in the answer. Reply with your FIVE best guesses as "
     "UPPERCASE Tagalog words (letters only, no spaces), best guess first. "
-    'Reply ONLY as JSON: {"guesses": ["...", "...", "..."]}. No explanation.'
+    'Reply ONLY as JSON: {"guesses": ["...", "...", "...", "...", "..."]}. '
+    "No explanation."
 )
 
 
