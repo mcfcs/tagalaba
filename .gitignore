@@ -52,3 +52,4 @@ Thumbs.db
 .vscode/
 .idea/
 data/smoke.jsonl
+data/diagnose_report.txt
