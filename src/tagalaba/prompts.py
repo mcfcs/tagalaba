@@ -50,12 +50,18 @@ def gen_user_prompt(wr: WordResources, n: int) -> str:
 
 VERIFY_SYSTEM = (
     "You are an expert Tagalog crossword solver. You are given a clue and the "
-    "number of letters in the answer. Reply with your FIVE best guesses as "
-    "UPPERCASE Tagalog words (letters only, no spaces), best guess first. "
+    "number of letters in the answer. Some letters may already be filled in "
+    "from crossing words, shown as a pattern where '_' is an unknown letter "
+    "(e.g. 'D__A__I'); if a pattern is given, every guess MUST fit it. "
+    "Reply with your FIVE best guesses as UPPERCASE Tagalog words (letters "
+    "only, no spaces), best guess first. "
     'Reply ONLY as JSON: {"guesses": ["...", "...", "...", "...", "..."]}. '
     "No explanation."
 )
 
 
-def verify_user_prompt(clue: str, length: int) -> str:
-    return f"Pahiwatig: {clue}\nBilang ng titik: {length}"
+def verify_user_prompt(clue: str, length: int, pattern: str | None = None) -> str:
+    base = f"Pahiwatig: {clue}\nBilang ng titik: {length}"
+    if pattern:
+        base += f"\nAlam nang mga titik (pattern, _ = hindi alam): {pattern}"
+    return base

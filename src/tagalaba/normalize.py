@@ -92,6 +92,98 @@ def gloss_is_tagalog(text: str) -> bool:
     return any(w in _TL_MARKERS for w in words)
 
 
+# --- Tagalog morphology (heuristic) -----------------------------------------
+#
+# The round-trip verifier rejects clues whose solver lands on a different
+# *inflection* of the right word (DUMAMPI vs DAMPI, MAGTAAS vs TAAS). Tagalog is
+# heavily affixing/reduplicating, so an exact-surface match is too strict. These
+# helpers reduce a word to a SET of plausible roots; two words "share a lemma"
+# if their root sets intersect on a stem of >= 4 letters. The set approach is
+# deliberately generous on *recall* (try every reduction) but guarded on
+# *precision* by the length-4 floor, so MAGANDA->{GANDA,ANDA,...} still matches
+# GANDA without ANDA causing spurious hits.
+
+# Applied longest-first so MAG- is tried before MA-, etc.
+_PREFIXES = (
+    "ipinagpa", "ipinaki", "ipinag", "ipina", "ipa",
+    "nakikipag", "makikipag", "nakipag", "makipag",
+    "nakapagpa", "makapagpa", "nakapag", "makapag",
+    "nagpaka", "magpaka", "napaka", "pinaka",
+    "nakaka", "makaka", "nagpa", "magpa", "pagpa",
+    "pinag", "pina", "nagka", "magka", "pagka",
+    "naka", "maka", "naki", "maki",
+    "nang", "mang", "pang", "nag", "mag", "pag",
+    "nam", "mam", "pam", "nan", "man", "pan",
+    "na", "ma", "pa", "ka", "ki", "um", "in", "i",
+)
+_SUFFIXES = ("han", "hin", "ng", "an", "in")
+
+
+def _reductions(w: str) -> set[str]:
+    """One layer of plausible morphological reductions of an answer-key form."""
+    out: set[str] = set()
+    n = len(w)
+    # leading doubled vowel reduplication: AALUG -> ALUG
+    if n >= 3 and w[0] == w[1] and w[0] in "AEIOU":
+        out.add(w[1:])
+    # CV-syllable reduplication: SUSULAT -> SULAT, LALARO -> LARO
+    if n >= 4 and w[0:2] == w[2:4]:
+        out.add(w[2:])
+    # exact full-word reduplication (hyphen already stripped): HALOHALO -> HALO
+    if n % 2 == 0 and w[: n // 2] == w[n // 2:]:
+        out.add(w[: n // 2])
+    # -um-/-in- infix after an initial consonant: DUMAMPI -> DAMPI
+    if n >= 4 and w[0] not in "AEIOU" and w[1:3] in ("UM", "IN"):
+        out.add(w[0] + w[3:])
+    # prefix strip (one prefix), keeping a >=3-letter remainder
+    for p in _PREFIXES:
+        pu = p.upper()
+        if w.startswith(pu) and n - len(pu) >= 3:
+            out.add(w[len(pu):])
+    # suffix strip (one suffix)
+    for s in _SUFFIXES:
+        su = s.upper()
+        if w.endswith(su) and n - len(su) >= 3:
+            out.add(w[: -len(su)])
+    return out
+
+
+def stem_candidates(word: str) -> set[str]:
+    """All plausible roots of `word` (incl. itself), via a fixed-point of
+    `_reductions`. Generous by design; precision comes from the caller's
+    >=4-letter match floor."""
+    w = answer_key(word)
+    if not w:
+        return set()
+    seen = {w}
+    frontier = {w}
+    for _ in range(5):  # bounded; layered affixes (NAG+redup) need a few passes
+        nxt: set[str] = set()
+        for cand in frontier:
+            for r in _reductions(cand):
+                if r not in seen:
+                    seen.add(r)
+                    nxt.add(r)
+        if not nxt:
+            break
+        frontier = nxt
+    return {s for s in seen if len(s) >= 3}
+
+
+def same_lemma(a: str, b: str, *, min_len: int = 4) -> bool:
+    """True if `a` and `b` plausibly share a Tagalog root of >= min_len letters."""
+    shared = stem_candidates(a) & stem_candidates(b)
+    return any(len(s) >= min_len for s in shared)
+
+
+def reveal_pattern(word: str, every: int = 3) -> str:
+    """Deterministic crossing-letter simulation: reveal every Nth letter, mask
+    the rest with '_'. DUMAMPI -> 'D__A__I'. Mimics the partial constraints a
+    solver gets from filled crossings in a real grid."""
+    k = answer_key(word)
+    return "".join(ch if i % every == 0 else "_" for i, ch in enumerate(k))
+
+
 def leaks_answer(clue: str, answer: str) -> bool:
     """True if the clue reveals the answer (shared word stem)."""
     ak = answer_key(answer)

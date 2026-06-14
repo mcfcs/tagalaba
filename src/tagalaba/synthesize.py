@@ -23,7 +23,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import config, prompts
-from .normalize import answer_key, leaks_answer
+from .normalize import answer_key, leaks_answer, reveal_pattern, same_lemma
 from .sources import WordResources, get_index
 
 
@@ -58,18 +58,29 @@ def _done_keys(out_path: str) -> set[str]:
     return done
 
 
-def _accept_rank(wr: WordResources, guesses: list[str]) -> int:
-    """Rank of the first guess matching the answer OR a known synonym of it.
+def _accept_rank(wr: WordResources, guesses: list[str]) -> tuple[int, str]:
+    """(rank, tier) of the first guess that counts as solving the clue.
 
-    Accepting synonyms (AKLAT<->LIBRO) means a clue that elicits the right
-    concept counts as solved -- crossing letters disambiguate in a real grid.
+    Tiers, strictest first -- recorded per clue so training can filter by rigor:
+      exact   : guess IS the answer.
+      synonym : guess is a listed synonym (AKLAT<->LIBRO) -- right concept.
+      lemma   : guess shares a Tagalog root with the answer or a synonym
+                (DUMAMPI<->DAMPI) -- right word, different inflection.
+    All three are fair because crossing letters disambiguate in a real grid.
+    Returns (0, "") if no guess qualifies.
     """
-    ok = {wr.key} | {answer_key(s) for s in wr.synonyms}
-    ok.discard("")
+    syns = {answer_key(s) for s in wr.synonyms} - {""}
     for i, g in enumerate(guesses, 1):
-        if answer_key(g) in ok:
-            return i
-    return 0
+        gk = answer_key(g)
+        if not gk:
+            continue
+        if gk == wr.key:
+            return i, "exact"
+        if gk in syns:
+            return i, "synonym"
+        if same_lemma(gk, wr.key) or any(same_lemma(gk, s) for s in syns):
+            return i, "lemma"
+    return 0, ""
 
 
 def _process_word(wr, gen, ver, args):
@@ -107,19 +118,39 @@ def _process_word(wr, gen, ver, args):
             raise
         except Exception:  # noqa: BLE001 - transient; skip clue
             continue
-        rank = _accept_rank(wr, guesses)
+        rank, tier = _accept_rank(wr, guesses)
         keep = bool(rank and rank <= args.max_rank)
+
+        # Pattern rescue: a fair clue can still miss when the solver lands on a
+        # meaning-neighbour of the right length. Re-solve once with a few letters
+        # revealed (as a real grid's crossings would), and keep it at the lower
+        # "pattern" tier if that pins the answer.
+        if not keep and getattr(args, "pattern_rescue", True):
+            pat = reveal_pattern(wr.key)
+            try:
+                pguesses = ver.guesses(
+                    prompts.VERIFY_SYSTEM,
+                    prompts.verify_user_prompt(clue, len(wr.key), pat))
+            except FatalAPIError:
+                raise
+            except Exception:  # noqa: BLE001 - transient; skip rescue
+                pguesses = []
+            prank, _ptier = _accept_rank(wr, pguesses)
+            if prank and prank <= args.max_rank:
+                keep, rank, tier = True, prank, "pattern"
+                guesses = guesses + ["[pattern]"] + pguesses
+
         if args.debug_log:
             dbg_records.append({
                 "answer": wr.display.upper(), "clue": clue,
                 "difficulty": c.get("difficulty"), "style": c.get("style"),
-                "rank": rank, "guesses": guesses, "kept": keep,
+                "rank": rank, "tier": tier, "guesses": guesses, "kept": keep,
             })
         if keep:
             out_records.append({
                 "key": wr.key, "answer": wr.display.upper(), "length": len(wr.key),
                 "clue": clue, "difficulty": c.get("difficulty"),
-                "style": c.get("style"), "verify_rank": rank,
+                "style": c.get("style"), "verify_rank": rank, "match": tier,
                 "gen_model": gen.model, "verify_model": ver.model,
             })
     return out_records, dbg_records, attempted, dropped_long, None
@@ -204,6 +235,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="keep clue if answer is within this guess rank (1=strict)")
     ap.add_argument("--max-words", type=int, default=12,
                     help="drop clues longer than this many words")
+    ap.add_argument("--no-pattern-rescue", dest="pattern_rescue",
+                    action="store_false",
+                    help="disable the revealed-letter rescue re-solve")
     ap.add_argument("--debug-log", default=None,
                     help="write every attempt (clue, rank, guesses, kept) here")
     ap.add_argument("--workers", type=int, default=config.WORKERS,

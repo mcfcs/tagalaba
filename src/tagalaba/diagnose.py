@@ -79,8 +79,10 @@ def run(args: argparse.Namespace) -> int:
     proc_args = Namespace(clues_per_word=args.clues_per_word, max_words=12,
                           max_rank=args.max_rank, debug_log=True)
 
+    tiers = ("exact", "synonym", "lemma", "pattern")
     for name, words in buckets.items():
         kept = attempted = 0
+        by_tier = {t: 0 for t in tiers}
         samples_kept, samples_dropped = [], []
         _p(rep, f"===== {name} ({len(words)} words) =====")
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -91,12 +93,15 @@ def run(args: argparse.Namespace) -> int:
                 _p(rep, "  !", warn)
             attempted += att
             kept += len(recs)
+            for r in recs:
+                by_tier[r.get("match", "exact")] = by_tier.get(r.get("match"), 0) + 1
             for d in dbgs:
                 (samples_kept if d["kept"] else samples_dropped).append(d)
         pass_rate = kept / max(attempted, 1)
-        _p(rep, f"  -> kept {kept}/{attempted}  ({pass_rate:.0%} round-trip pass rate)")
+        breakdown = "  ".join(f"{t}={by_tier[t]}" for t in tiers)
+        _p(rep, f"  -> kept {kept}/{attempted}  ({pass_rate:.0%} pass)   [{breakdown}]")
         for d in samples_kept[:3]:
-            _p(rep, f"     KEPT  {d['answer']:12} {d['clue']}")
+            _p(rep, f"     KEPT[{d.get('tier',''):7}] {d['answer']:12} {d['clue']}")
         for d in samples_dropped[:3]:
             _p(rep, f"     DROP  {d['answer']:12} {d['clue']}")
             _p(rep, f"           solver guessed: {', '.join(d['guesses'][:5])}")
